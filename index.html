@@ -151,6 +151,18 @@
   const GROQ_MODEL = "llama-3.3-70b-versatile";
   const HISTORY_STORAGE = "mvt_history";
   const HISTORY_MAX = 10;
+  const RECENT_STORAGE = "mvt_recent_refs";
+  const RECENT_MAX = 25;
+  const VARIETY_HINTS = [
+    "Consider a verse from the Psalms.",
+    "Consider a verse from the Old Testament prophets (e.g. Isaiah, Jeremiah, Habakkuk, Zephaniah).",
+    "Consider a verse from the Gospels.",
+    "Consider a verse from Paul's epistles other than the most commonly quoted ones.",
+    "Consider a verse from the general epistles (e.g. James, 1 Peter, 1 John, Hebrews).",
+    "Consider a verse from the wisdom books (e.g. Proverbs, Ecclesiastes, Job).",
+    "Consider a lesser-known verse from the historical books (e.g. Joshua, 1 Samuel, Nehemiah).",
+    "Consider a verse people rarely quote, not a famous one.",
+  ];
   const EMOTIONS = [
     { name: "Joy", emoji: "😊", color: "#F2C879" },
     { name: "Sadness", emoji: "😢", color: "#A8C3D9" },
@@ -164,6 +176,16 @@
     { name: "Confusion", emoji: "🌊", color: "#A9CFD6" },
   ];
   let selected = null, loading = false, lastEmotion = null, result = null, history = [], toastTimer = null;
+  let recentRefs = [];
+  function normalizeRef(ref) {
+    return String(ref || "").toLowerCase().replace(/\s+/g, " ").trim();
+  }
+  function rememberRef(ref) {
+    const n = normalizeRef(ref);
+    if (!n) return;
+    recentRefs = [n, ...recentRefs.filter(r => r !== n)].slice(0, RECENT_MAX);
+    try { localStorage.setItem(RECENT_STORAGE, JSON.stringify(recentRefs)); } catch {}
+  }
   const grid = document.getElementById("emotionGrid");
   const emotionTag = document.getElementById("emotionTag");
   const loader = document.getElementById("loader");
@@ -177,6 +199,7 @@
   const toastEl = document.getElementById("toast");
   function init() {
     try { history = JSON.parse(localStorage.getItem(HISTORY_STORAGE) || "[]"); } catch { history = []; }
+    try { recentRefs = JSON.parse(localStorage.getItem(RECENT_STORAGE) || "[]"); } catch { recentRefs = []; }
     renderGrid(); renderHistory();
   }
   function renderGrid() {
@@ -201,20 +224,24 @@
     hideError(); hideResult(); renderGrid();
     fetchDevotional(emotion);
   }
-  async function fetchDevotional(emotion) {
+  async function fetchDevotional(emotion, attempt = 0) {
     if (!GROQ_API_KEY || GROQ_API_KEY === "REPLACE_WITH_YOUR_GROQ_API_KEY") {
       showError("The Groq API key has not been set in the code yet."); return;
     }
     setLoading(true);
     try {
+      const hint = VARIETY_HINTS[Math.floor(Math.random() * VARIETY_HINTS.length)];
+      const avoidList = recentRefs.length
+        ? `\n\nIMPORTANT — You have already given these verses recently. Do NOT use any of them, or any verse from the same chapter:\n${recentRefs.map(r => "- " + r).join("\n")}`
+        : "";
       const res = await fetch(GROQ_URL, {
         method: "POST",
         headers: { "Authorization": "Bearer " + GROQ_API_KEY, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: GROQ_MODEL, temperature: 0.8,
+          model: GROQ_MODEL, temperature: 1.1, top_p: 0.95,
           messages: [
-            { role: "system", content: "You are a gentle Christian devotional guide." },
-            { role: "user", content: `The user's emotion today is:\n${emotion.name}\n\nReturn STRICT JSON.\n\n{\n"emotion":"",\n"verse_reference":"",\n"verse_text":"",\n"reflection":"",\n"prayer":"",\n"action":""\n}\n\nRules:\n- Choose exactly one Bible verse\n- Use public-domain wording when possible\n- Reflection max 80 words\n- Prayer max 40 words\n- Action max 20 words\n- Warm and hopeful tone\n- Do not preach\n- Return JSON only` }
+            { role: "system", content: "You are a gentle Christian devotional guide. You take pride in surfacing fresh, varied scripture — never defaulting to the same famous verse twice. (session " + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ")" },
+            { role: "user", content: `The user's emotion today is:\n${emotion.name}\n\nReturn STRICT JSON.\n\n{\n"emotion":"",\n"verse_reference":"",\n"verse_text":"",\n"reflection":"",\n"prayer":"",\n"action":""\n}\n\nRules:\n- Choose exactly one Bible verse\n- ${hint}\n- Avoid the single most famous verse for this emotion; pick a fitting but less predictable one\n- Use public-domain wording when possible\n- Reflection max 80 words\n- Prayer max 40 words\n- Action max 20 words\n- Warm and hopeful tone\n- Do not preach\n- Return JSON only${avoidList}` }
           ]
         })
       });
@@ -232,6 +259,11 @@
       if (s === -1 || e === -1) throw new Error("The response couldn't be read as devotional JSON.");
       const obj = JSON.parse(raw.slice(s, e + 1));
       if (!obj.verse_reference || !obj.verse_text) throw new Error("The response was missing a verse.");
+      if (attempt < 2 && recentRefs.includes(normalizeRef(obj.verse_reference))) {
+        // Model repeated a recent verse — try again automatically
+        return fetchDevotional(emotion, attempt + 1);
+      }
+      rememberRef(obj.verse_reference);
       result = { ...obj, emotionDisplay: `${emotion.emoji} ${emotion.name}` };
       showResult(); resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
     } catch (err) {
@@ -305,6 +337,7 @@
   }
   clearBtn.onclick = () => {
     localStorage.removeItem(HISTORY_STORAGE); history = [];
+    localStorage.removeItem(RECENT_STORAGE); recentRefs = [];
     renderHistory(); showToast("History cleared");
   };
   function showToast(msg) {
